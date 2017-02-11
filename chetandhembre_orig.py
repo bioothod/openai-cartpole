@@ -244,7 +244,6 @@ class Environment(object):
     #self.env.monitor.start('results/cartpole',force=True)
     while episodes < self.total_episodes:
       print 'running episode: %s' % str(episodes + 1)
-      self.env.seed(1)
       state = self.env.reset()
       is_done = False
       total_reward = 0
