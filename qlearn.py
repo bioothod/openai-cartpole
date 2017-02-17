@@ -1,13 +1,11 @@
-import random
+import time
+import math
 
 import numpy as np
 import pandas as pd
 
-from keras.models import Sequential
-from keras.layers import Dense, Activation, Merge, Dropout
-from keras.utils.np_utils import to_categorical
-from keras.optimizers import Adagrad, RMSprop
-from keras.regularizers import l1l2, activity_l2
+import tensorflow as tf
+from tensorflow.contrib.layers import apply_regularization, l1_l2_regularizer
 
 class state(object):
     def __init__(self, value):
@@ -33,79 +31,83 @@ class action(object):
         return str(self.action)
 
 class qnn(object):
-    def __init__(self, state_shape, actions):
-        self.batch_size = 128
-        self.fit_epochs = 128
+    def __init__(self, input_size, output_size):
+        self.learning_rate = 0.0025
+        self.reg_beta = 0.001
+        self.l1_neurons = 128
+        self.train_num = 0
 
-        self.learn_num = 0
+        global_step = tf.Variable(0, trainable=False)
+        learning_rate = tf.train.exponential_decay(self.learning_rate, global_step, 10000, 0.5, staircase=True)
+        reg_beta = tf.train.exponential_decay(self.reg_beta, global_step, 10000, 0.5, staircase=True)
 
-        self.m = Sequential()
-        self.m.add(Dense(64, input_shape=state_shape, activation='tanh', W_regularizer=l1l2(0.01), activity_regularizer=activity_l2(0.01)))
-        self.m.add(Dropout(0.5))
-        self.m.add(Dense(64, activation='relu', W_regularizer=l1l2(0.01), activity_regularizer=activity_l2(0.01)))
-        self.m.add(Dropout(0.5))
-        self.m.add(Dense(actions, activation='relu', W_regularizer=l1l2(0.01), activity_regularizer=activity_l2(0.01)))
+        x = tf.placeholder(tf.float32, [None, input_size], name='x')
+        y = tf.placeholder(tf.float32, [None, output_size], name='y')
 
-        self.m.compile(optimizer='rmsprop', loss='mse')
+        w1 = tf.Variable(tf.random_uniform([input_size, self.l1_neurons], dtype=tf.float32), name='w1')
+        b1 = tf.Variable(tf.random_uniform([self.l1_neurons], dtype=tf.float32), name='b1')
+        tf.summary.histogram('w1', w1)
+        h1 = tf.add(tf.matmul(x, w1), b1, name='h1')
+        nl_h1 = tf.nn.tanh(h1, name='nonlinear_h1')
+        tf.summary.histogram('nonlinear_h1', nl_h1)
 
-    def update(self, state, actions):
-        self.m.fit(state.value(), actions.value(), nb_epoch=self.fit_epochs, verbose=0)
+        w2 = tf.Variable(tf.random_uniform([self.l1_neurons, output_size], dtype=tf.float32), name='w2')
+        b2 = tf.Variable(tf.random_uniform([output_size], dtype=tf.float32), name='b2')
+        tf.summary.histogram('w2', w2)
 
-    def learn(self, history):
-        #batch = history
-        batch = random.sample(history, min(self.batch_size, len(history)))
-        #batch[-1] = history[-1]
+        #self.model =  tf.nn.relu(tf.add(tf.matmul(nl_h1, w2), b2, name='model'))
+        self.model =  tf.add(tf.matmul(nl_h1, w2), b2, name='model')
+        tf.summary.histogram('model', self.model)
 
-        assert len(batch) != 0
-        assert len(batch[0]) != 0
-        assert len(batch[0][0].value()) != 0
+        reg_val = apply_regularization(l1_l2_regularizer(scale_l1=1.0, scale_l2=1.0), [w1, w2]) * reg_beta
+        tf.summary.scalar('reg_beta', reg_beta)
+        tf.summary.scalar('reg_val', reg_val)
+        tf.summary.scalar('learning_rate', learning_rate)
 
+        self.error = tf.reduce_mean(tf.square(self.model - y) + reg_val, name='error')
+        tf.summary.scalar('error', self.error)
 
-        xs = np.ndarray(shape=(len(batch), len(batch[0][0].value())))
-        y = np.ndarray(shape=(len(batch), len(batch[0][1])))
-        df = pd.DataFrame(index=range(xs.shape[0]), columns=['State', 'Q'])
-        idx = 0
-        for e in batch:
-            xs[idx] = e[0].value()
-            y[idx] = e[1]
+        self.optimizer = tf.train.RMSPropOptimizer(learning_rate, momentum=0.9, name='optimizer').minimize(self.error, global_step=global_step)
+        self.sess = tf.Session()
+        self.merged = tf.summary.merge_all()
+        self.summary_writter = tf.summary.FileWriter("/tmp/cp0/run.%d" % (time.time()), self.sess.graph)
 
-            df.ix[idx, ['State', 'Q']] = e[0].value(), e[1]
+        self.init = tf.global_variables_initializer()
+        self.sess.run(self.init)
 
-            idx += 1
-            #print "learn: state: %s -> %s" % (e[0].value(), e[1])
+    def train(self, states, qvals):
+        self.train_num += 1
 
-        #print df.head()
-        out = 'json/learn.%d.json' % (self.learn_num)
-        df.to_json(out, orient='index')
-        self.learn_num += 1
+        summary, _, error = self.sess.run([self.merged, self.optimizer, self.error], feed_dict={
+                'x:0': states,
+                'y:0': qvals,
+            })
+        self.summary_writter.add_summary(summary, self.train_num)
 
+        return error
 
-        s = batch[-1][0]
-        q = batch[-1][1]
-        #print "learn: before: %s -> %s, need: %s" % (s.value(), self.q(s), q)
-
-        self.m.fit(xs, y, nb_epoch=self.fit_epochs, verbose=0)
-
-        #print "learn: after : %s -> %s, need: %s" % (s.value(), self.q(s), q)
-
-    def q(self, state):
-        p = self.m.predict(np.array([state.value()]), verbose=0)
+    def q(self, states):
+        p = self.sess.run([self.model], feed_dict={
+                'x:0': states,
+            })
         return p[0]
-
-    def qa(self, state, action):
-        p = self.q(state)
-
-        #print "qa: state: %s -> %s" % (state.value(), p)
-        return p[action]
 
 class qlearn(object):
     def __init__(self, state_shape, actions):
-        self.alpha = 0.9
-        self.gamma = 0.1
-        self.random_action_alpha = 0.8
+        self.alpha = 1
+        self.gamma = 0.99
+        self.random_action_alpha = 1
+        self.random_action_alpha_cap = 1
+        self.ra_range_begin = 0.1
+        self.ra_range_end = 0.99
+        self.total_actions = 0
         self.lam = 0.9
+        self.history_size = 100000
+        self.batch_size = 128
 
-        self.Q = qnn(state_shape, actions)
+        self.actions = actions
+
+        self.Q = qnn(state_shape[0], actions)
         self.history = []
         self.E = {}
 
@@ -113,20 +115,22 @@ class qlearn(object):
         return np.random.choice()
 
     def get_action(self, state):
-        random_alpha_choice = np.random.choice([True, False], p=[self.random_action_alpha, 1-self.random_action_alpha])
+        self.total_actions += 1
+        self.random_action_alpha = self.ra_range_begin + (self.random_action_alpha_cap - self.ra_range_begin) * math.exp(-0.0001 * self.total_actions)
 
-        q = self.Q.q(state)
+        self.random_action_alpha = 0.1
+        random_choice = np.random.choice([True, False], p=[self.random_action_alpha, 1-self.random_action_alpha])
+
         ch = 0
-
-        if random_alpha_choice:
-            ch = np.random.randint(0, len(q))
+        if random_choice:
+            ch = np.random.randint(0, self.actions)
         else:
-            ch = np.argmax(q)
+            v = state.value()
+            q = self.Q.q(v.reshape(1, v.shape[0]))
+            ch = np.argmax(q[0])
+            #print "state: %s, q: %s, action: %s" % (state, q, ch)
 
-        return ch, q
-
-    def qa(self, state, action):
-        return self.Q.qa(state, action)
+        return ch
 
     def max_action(self, state):
         q = self.Q.q(state)
@@ -154,17 +158,54 @@ class qlearn(object):
                 et[a] = eta
             self.E[s] = et
 
-    def update(self, s, a, sn, r):
-        #eta = self.et_increment(s, a)
-        eta = 1.
+    def store(self, s, a, sn, r, done):
+        if len(self.history) > self.history_size:
+            self.history = self.history[1:]
 
-        amax_next, qvals_next = self.max_action(sn)
-        qmax_next = qvals_next[amax_next]
-        qvals = self.Q.q(s)
-        current_qa = qvals[a]
-        qsa = current_qa + self.alpha * (r + self.gamma * qmax_next - current_qa) * eta
-        qvals[a] = qsa
+        self.history.append((s, a, sn, r, done))
 
-        self.history.append((s, qvals))
-        #self.et_discount()
-        return qsa
+    def learn(self):
+        hsize = len(self.history)
+        indexes = np.random.randint(hsize, size=min(self.batch_size, hsize))
+        batch = []
+        for i in indexes:
+            batch.append(self.history[i])
+
+        assert len(batch) != 0
+        assert len(batch[0]) != 0
+        assert len(batch[0][0].value()) != 0
+
+        states_shape = (len(batch), len(batch[0][0].value()))
+        states = np.ndarray(shape=states_shape)
+        next_states = np.ndarray(shape=states_shape)
+
+        q_shape = (len(batch), self.actions)
+        qvals = np.ndarray(shape=q_shape)
+        next_qvals = np.ndarray(shape=q_shape)
+
+        idx = 0
+        for e in batch:
+            s, a, sn, r, done = e
+
+            states[idx] = s.value()
+            next_states[idx] = sn.value()
+            idx += 1
+
+        qvals = self.Q.q(states)
+        next_qvals = self.Q.q(next_states)
+
+        qvals_orig = qvals.copy()
+        for idx in range(len(batch)):
+            e = batch[idx]
+            s, a, sn, r, done = e
+
+            qmax_next = np.amax(next_qvals[idx])
+            if done:
+                r = -10
+                qmax_next = 0
+
+            current_qa = qvals[idx][a]
+            qsa = current_qa + self.alpha * (r + self.gamma * qmax_next - current_qa)
+            qvals[idx][a] = qsa
+
+        self.Q.train(states, qvals)
