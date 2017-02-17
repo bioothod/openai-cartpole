@@ -11,7 +11,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from keras.models import Sequential
 from keras.layers import Dense, Activation, Merge, Dropout
 from keras.utils.np_utils import to_categorical
-from keras.optimizers import Adagrad, RMSprop
+from keras.optimizers import Adagrad, RMSprop, SGD
 from keras.regularizers import l2
 
 """
@@ -44,18 +44,22 @@ class Model(object):
       #self.m.add(Dense(64, activation='relu', W_regularizer=l2(0.01), bias=True))
       self.m.add(Dense(output_size, activation='linear', bias=True))
 
-      self.m.compile(optimizer='rmsprop', loss='mse', learning_rate=0.0025)
+      #sgd = SGD(lr=0.0025, decay=1e-6, momentum=0.9, nesterov=True)
+      rmsprop = RMSprop(lr=LEARNING_RATE, rho=0.9, epsilon=1e-08, decay=0.0)
+      self.m.compile(loss='mean_squared_error', optimizer=rmsprop)
+      #self.m.compile(optimizer='rmsprop', loss='mse', learning_rate=0.0025)
 
   
   def get_action(self, state):
       state = np.array(state, dtype=np.float64)
       p = self.m.predict(state, verbose=0)
-      return p[0][0]
+      return p[0]
   
   def train(self, states, actions):
       #states = np.array(states, dtype=np.float64)
       #actions = np.array(actions, dtype=np.float64)
-      self.m.train_on_batch(states, actions)
+      error = self.m.train_on_batch(states, actions)
+      #print "train: %s -> %s: %s" % (states.shape, actions.shape, error)
   
   def get_action_multiple(self, states):
       states = np.array(states, dtype=np.float64)
@@ -64,7 +68,6 @@ class Model(object):
 
   def close(self):
       pass
-
 
 class Memory(object):
   def __init__(self):
@@ -185,7 +188,7 @@ class Agent(object):
           y = np.vstack((y, current_state_q_value))
       
       self.model.train(x, y)
-  
+
 class Environment(object):
   def __init__(self, env_name, total_episodes):
     self.env = gym.make(env_name)
@@ -235,6 +238,7 @@ class Environment(object):
         return 
 
       episodes += 1
+
     
   def _plot(self):
     plt.plot(self.avg)
@@ -243,6 +247,5 @@ class Environment(object):
     plt.savefig('rewards.png')
     plt.show()
 
-with tf.device('/cpu:0'):
-    env = Environment('CartPole-v0', 250)
-    env.run()
+env = Environment('CartPole-v0', 250)
+env.run()
