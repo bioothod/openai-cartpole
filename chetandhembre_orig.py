@@ -1,3 +1,4 @@
+import time
 import math
 
 import numpy as np
@@ -37,12 +38,12 @@ class Model(object):
       x = tf.placeholder(tf.float64, [None, input_size], name='x')
       y = tf.placeholder(tf.float64, [None, output_size], name='y')
 
-      w1 = tf.Variable(tf.random_normal([input_size, 64], dtype=tf.float64), name='w1')
-      b1 = tf.Variable(tf.random_normal([64], dtype=tf.float64), name='b1')
+      w1 = tf.Variable(tf.random_uniform([input_size, 64], dtype=tf.float64), name='w1')
+      b1 = tf.Variable(tf.random_uniform([64], dtype=tf.float64), name='b1')
       tf.summary.histogram('w1', w1)
       
-      w2 = tf.Variable(tf.random_normal([64, output_size], dtype=tf.float64), name='w2')
-      b2 = tf.Variable(tf.random_normal([output_size], dtype=tf.float64), name='b2')
+      w2 = tf.Variable(tf.random_uniform([64, output_size], dtype=tf.float64), name='w2')
+      b2 = tf.Variable(tf.random_uniform([output_size], dtype=tf.float64), name='b2')
       tf.summary.histogram('w2', w2)
 
       h1 = tf.add(tf.matmul(x, w1), b1, name='h1')
@@ -56,37 +57,29 @@ class Model(object):
       tf.summary.scalar('error', self.error)
 
       self.optimzer = tf.train.RMSPropOptimizer(LEARNING_RATE, name='Optimizer').minimize(self.error)
-      self.step = 0
       self.sess = tf.Session()
       self.merged = tf.summary.merge_all()
-      self.summary_writter = tf.summary.FileWriter("/tmp/cart_pole", self.sess.graph)
+      self.summary_writter = tf.summary.FileWriter("/tmp/cart_pole/run.%d" % (time.time()), self.sess.graph)
 
       self.init = tf.global_variables_initializer()
       self.sess.run(self.init)
   
   def get_action(self, state):
-      #state = np.array(state, dtype=np.float64)
       output = self.sess.run([self.model], feed_dict={
         'x:0': state
       })
       return output[0][0]
   
   def train(self, states, actions):
-      #states = np.array(states, dtype=np.float64)
-      #actions = np.array(actions, dtype=np.float64)
       summary, _, error = self.sess.run([self.merged, self.optimzer, self.error], feed_dict={
         'x:0': states,
         'y:0': actions
       })
       self.summary_writter.add_summary(summary, self.count)
       self.count += 1
-      # print error
-      # sess.close()
-      #print "train: %s -> %s: %s" % (states.shape, actions.shape, error)
       return error
   
   def get_action_multiple(self, states):
-      #states = np.array(states, dtype=np.float64)
       output = self.sess.run([self.model], feed_dict={
         'x:0': states
       })
@@ -138,14 +131,7 @@ class Agent(object):
     @staticmethod
     def is_greddy(epsilon):
       return np.random.choice([0, 1], 1, p=[epsilon, 1 - epsilon])[0]
-    
-    def update_epsilon(self):
-      index = int(self.total_actions / EPSILON_STEP_LIMIT)
-      if index > len(self.epsilons - 1):
-        index = len(self.epsilons) - 1
-      
-      self.epsilons_index = index
-    
+
     def take_action(self, state):
       """
       actions are whether you want to go right or left
@@ -156,6 +142,7 @@ class Agent(object):
       msg = ''
       if is_greedy:
         action = np.argmax(q_values)
+        #print "state: %s, q: %s, action: %s" % (state, q_values, action)
       else:
         action = np.random.choice([0, 1], 1)[0]
         msg = 'explorer'
@@ -176,45 +163,32 @@ class Agent(object):
 
     def update(self):
       experiences = self.memory.recall()
-      current_states = None
-      next_states = None
+      current_states = np.ndarray(shape=(len(experiences), 4))
+      next_states = np.ndarray(shape=(len(experiences), 4))
+
+      idx = 0
       for experience in experiences:
         current_state, next_state, action, reward, is_done = experience
-        current_state = np.array(current_state).reshape(1, 4)
-        next_state = np.array(next_state).reshape(1, 4)
-        if current_states is None:
-          current_states = current_state
-          next_states = next_state
-        else:
-          current_states = np.vstack((current_states, current_state))
-          next_states = np.vstack((next_states, next_state))
+        current_states[idx] = current_state
+        next_states[idx] = next_state
+
+        idx += 1
       
       current_state_q_values = self.model.get_action_multiple(current_states)
       next_state_q_values = self.model.get_action_multiple(next_states)
-      
-      x = None
-      y = None
+
       for i in range(len(experiences)):
         current_state, next_state, action, reward, is_done = experiences[i]
-        current_state_q_value = np.array(current_state_q_values[i], dtype=np.float64)
-        next_state_q_value = np.array(next_state_q_values[i], dtype=np.float64)
+
+        next_max = np.amax(next_state_q_values[i])
         if is_done:
           reward = -10
-          next_state_q_value = [0.0, 0.0]
+          next_max = 0
         
-        current_state_q_value[action] = ALPHA * (reward + DISCOUNT_FACTORE * np.amax(next_state_q_value))
-        
-        current_state = np.array(current_state).reshape(1, 4)
-        current_state_q_value = np.array(current_state_q_value).reshape(1, 2)
-
-        if x is None:
-          x = current_state
-          y = current_state_q_value
-        else:
-          x = np.vstack((x, current_state))
-          y = np.vstack((y, current_state_q_value))
+        cur = current_state_q_values[i][action]
+        current_state_q_values[i][action] = cur + ALPHA * (reward + DISCOUNT_FACTORE * next_max - cur)
       
-      self.model.train(x, y)
+      self.model.train(current_states, current_state_q_values)
   
 class Environment(object):
   def __init__(self, env_name, total_episodes):
@@ -232,8 +206,8 @@ class Environment(object):
       return False
 
     _avg = float(sum(self.avg[l - 100: l])) / max(len(self.avg[l - 100: l]), 1)
-    print 'avg rewards: %s' % str(_avg)
-    if _avg > 195:
+    #print 'avg rewards: %s' % str(_avg)
+    if _avg > 195 and False:
       return True
     
     return False
@@ -243,7 +217,7 @@ class Environment(object):
     episodes = 0
     #self.env.monitor.start('results/cartpole',force=True)
     while episodes < self.total_episodes:
-      print 'running episode: %s' % str(episodes + 1)
+      #print 'running episode: %s' % str(episodes + 1)
       state = self.env.reset()
       is_done = False
       total_reward = 0
@@ -256,7 +230,7 @@ class Environment(object):
         self.agent.observe_results(state, next_state, action, reward, is_done)
         state = next_state
       
-      print 'rewards: %s, step: %s' % (str(total_reward), str(self.step))
+      print 'episode: %d, rewards: %s, step: %s' % (episodes+1, str(total_reward), str(self.step))
       if self.add_rewards(total_reward):
         print 'done with episods %s and steps: %s' % (str(episodes), str(self.step))
         self.env.monitor.close()
@@ -273,5 +247,5 @@ class Environment(object):
     plt.savefig('rewards.png')
     plt.show()
 
-env = Environment('CartPole-v0', 250)
+env = Environment('CartPole-v0', 2500)
 env.run()
